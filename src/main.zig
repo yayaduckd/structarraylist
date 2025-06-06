@@ -10,10 +10,10 @@ pub fn VecList(comptime T: type) type {
         capacity: usize,
         alloc: Allocator,
 
-        pub fn init(allocator: Allocator) !Self {
+        pub fn init(allocator: Allocator) Self {
             return Self{
                 .capacity = 0,
-                .items = try allocator.alloc(T, 0),
+                .items = allocator.alloc(T, 0) catch unreachable,
                 .alloc = allocator,
             };
         }
@@ -40,7 +40,7 @@ pub fn VecList(comptime T: type) type {
     };
 }
 
-pub fn StructVecList(comptime T: type) type {
+fn StructVecList(comptime T: type) type {
     const info = @typeInfo(T);
     if (info != .@"struct") {
         @panic("you just posted cringe...");
@@ -89,12 +89,24 @@ pub fn StructVecListReal(comptime T: type) type {
         length: usize,
 
         pub fn init(alloc: std.mem.Allocator) Self {
-            return Self{
+            var newStruct = Self{
                 .alloc = alloc,
                 .list = undefined,
                 .capacity = 0,
                 .length = 0,
             };
+            inline for (info.fields) |field| {
+                const field_name = field.name;
+                @field(newStruct.list, field_name) = @TypeOf(@field(newStruct.list, field_name)).init(alloc);
+            }
+            return newStruct;
+        }
+
+        pub fn deinit(self: *Self) void {
+            inline for (info.fields) |field| {
+                const field_name = field.name;
+                @field(self.list, field_name).deinit();
+            }
         }
 
         pub fn append(self: *Self, item: T) !void {
@@ -103,17 +115,58 @@ pub fn StructVecListReal(comptime T: type) type {
                 try @field(self.list, field_name).append(@field(item, field_name));
             }
         }
+
+        pub fn get_elem(self: *Self, index: usize) T {
+            var t: T = undefined;
+            inline for (info.fields) |field| {
+                const field_name = field.name;
+                @field(t, field_name) = @field(self.list, field_name).items[index];
+            }
+            return t;
+        }
+
+        pub fn get_attribute(self: *Self, comptime attribute_name: []const u8) @TypeOf(@field(self.list, attribute_name).items) {
+            return @field(self.list, attribute_name).items;
+        }
     };
 }
 
-// const StructVecListReal = struct {
-//     list: StructVecList(comptime T: type)
-// };
+var rng = std.Random.DefaultPrng.init(0);
+const rand = rng.random();
+
+const TestStruct = struct {
+    a: u32,
+    b: f64,
+    c: c_char,
+    d: [15]usize,
+
+    pub fn get_random() TestStruct {
+        var s = TestStruct{
+            .a = rand.int(u32),
+            .b = rand.float(f64),
+            .c = rand.int(c_char),
+            .d = undefined,
+        };
+
+        var ptr: [15 * @sizeOf(usize)]u8 = @bitCast(s.d);
+        rand.bytes(&ptr);
+        s.d = @bitCast(ptr);
+        return s;
+    }
+
+    pub fn eql(self: TestStruct, other: TestStruct) bool {
+        var equal = self.a == other.a and self.b == other.b and self.c == other.c;
+        for (self.d, other.d) |a, b| {
+            equal = equal and a == b;
+        }
+        return equal;
+    }
+};
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const alloc = gpa.allocator();
-    var vec = try VecList(u32).init(alloc);
+    var vec = VecList(u32).init(alloc);
     try vec.append(2);
     try vec.append(3);
     try vec.append(1231);
@@ -122,12 +175,20 @@ pub fn main() !void {
         std.log.debug("{d}", .{item});
     }
 
-    vec.deinit();
-
-    var a = StructVecListReal(VecList(u32)).init(alloc);
+    var svl = StructVecListReal(TestStruct).init(alloc);
     // a.init(alloc);
-    try a.append(vec);
+    const a = TestStruct.get_random();
+    std.log.debug("{}", .{a});
+
+    try svl.append(a);
+    const b = svl.get_elem(0);
+    const bat = svl.get_attribute("a");
+    std.log.debug("{any}", .{bat});
+    try testing.expect(a.eql(b));
+
+    svl.deinit();
     // _ = a;
+    vec.deinit();
 
     _ = gpa.deinit();
 }
