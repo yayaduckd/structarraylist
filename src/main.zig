@@ -34,8 +34,20 @@ pub fn VecList(comptime T: type) type {
             self.items[self.items.len - 1] = item;
         }
 
+        pub fn delete(self: *Self, index: usize) void {
+            // @memcpy(self.items[index .. self.items.len - 1], self.items[index + 1 .. self.items.len]);
+            for (self.items[index + 1 .. self.items.len], index + 1..) |item, i| {
+                self.items[i - 1] = item;
+            }
+            // self.items = self.items[0..self.item]
+            self.items.len -= 1;
+        }
+
         pub fn deinit(self: *Self) void {
-            self.alloc.free(self.items);
+            var free: []T = undefined;
+            free.ptr = self.items.ptr;
+            free.len = self.capacity;
+            self.alloc.free(free);
         }
     };
 }
@@ -114,6 +126,15 @@ pub fn StructVecListReal(comptime T: type) type {
                 const field_name = field.name;
                 try @field(self.list, field_name).append(@field(item, field_name));
             }
+            self.length += 1;
+        }
+
+        pub fn delete(self: *Self, index: usize) void {
+            inline for (info.fields) |field| {
+                const field_name = field.name;
+                @field(self.list, field_name).delete(index);
+            }
+            self.length -= 1;
         }
 
         pub fn get_elem(self: *Self, index: usize) T {
@@ -192,7 +213,170 @@ pub fn main() !void {
 
     _ = gpa.deinit();
 }
+test "VecList: init, append, deinit" {
+    const allocator = testing.allocator;
+    var list = VecList(i32).init(allocator);
+    defer list.deinit();
 
-test "basic add functionality" {
-    try testing.expect(3 + 7 == 10);
+    try testing.expectEqual(@as(usize, 0), list.items.len);
+    try testing.expectEqual(@as(usize, 0), list.capacity);
+
+    try list.append(10);
+    try testing.expectEqual(@as(usize, 1), list.items.len);
+    try testing.expectEqual(@as(i32, 10), list.items[0]);
+
+    try list.append(20);
+    try testing.expectEqual(@as(usize, 2), list.items.len);
+    try testing.expectEqual(@as(i32, 10), list.items[0]);
+    try testing.expectEqual(@as(i32, 20), list.items[1]);
+
+    // This will trigger a few reallocations due to the inefficient growth strategy
+    try list.append(30);
+    try list.append(40);
+    try testing.expectEqual(@as(usize, 4), list.items.len);
+    try testing.expectEqualSlices(i32, &.{ 10, 20, 30, 40 }, list.items);
+}
+
+test "VecList: delete" {
+    const allocator = testing.allocator;
+    var list = VecList(u8).init(allocator);
+    defer list.deinit();
+
+    try list.append('a');
+    try list.append('b');
+    try list.append('c');
+    try list.append('d');
+    try list.append('e');
+
+    // Expected state: ['a', 'b', 'c', 'd', 'e'], len=5
+    try testing.expectEqualSlices(u8, "abcde", list.items);
+
+    // Delete from middle
+    list.delete(2); // delete 'c'
+    try testing.expectEqual(@as(usize, 4), list.items.len);
+    try testing.expectEqualSlices(u8, &.{ 'a', 'b', 'd', 'e' }, list.items[0..4]);
+
+    // Delete from start
+    list.delete(0); // delete 'a'
+    try testing.expectEqual(@as(usize, 3), list.items.len);
+    try testing.expectEqualSlices(u8, &.{ 'b', 'd', 'e' }, list.items[0..3]);
+
+    // Delete from end
+    list.delete(2); // delete 'e'
+    try testing.expectEqual(@as(usize, 2), list.items.len);
+    try testing.expectEqualSlices(u8, &.{ 'b', 'd' }, list.items[0..2]);
+
+    // Delete until empty
+    list.delete(0);
+    list.delete(0);
+    try testing.expectEqual(@as(usize, 0), list.items.len);
+
+    // Test append after being emptied
+    try list.append('z');
+    try testing.expectEqual(@as(usize, 1), list.items.len);
+    try testing.expectEqualSlices(u8, "z", list.items);
+}
+
+// A simpler struct for testing StructVecListReal without the complexity
+// of random data or large arrays.
+const TestStructForTest = struct {
+    a: u32,
+    b: bool,
+
+    pub fn eql(self: @This(), other: @This()) bool {
+        return self.a == other.a and self.b == other.b;
+    }
+};
+
+test "StructVecListReal: init, append, get_elem" {
+    const allocator = testing.allocator;
+    var svl = StructVecListReal(TestStructForTest).init(allocator);
+    defer svl.deinit();
+
+    // Check initial state
+    try testing.expectEqual(@as(usize, 0), svl.length);
+    try testing.expectEqual(@as(usize, 0), svl.list.a.items.len);
+    try testing.expectEqual(@as(usize, 0), svl.list.b.items.len);
+
+    const s1 = TestStructForTest{ .a = 100, .b = true };
+    const s2 = TestStructForTest{ .a = 200, .b = false };
+
+    try svl.append(s1);
+    try testing.expectEqual(@as(usize, 1), svl.length);
+
+    // Retrieve and check
+    const s1_retrieved = svl.get_elem(0);
+    try testing.expect(s1.eql(s1_retrieved));
+
+    try svl.append(s2);
+    try testing.expectEqual(@as(usize, 2), svl.length);
+
+    // Retrieve and check again
+    const s2_retrieved = svl.get_elem(1);
+    try testing.expect(s2.eql(s2_retrieved));
+    // also check the first one is still there
+    const s1_retrieved_again = svl.get_elem(0);
+    try testing.expect(s1.eql(s1_retrieved_again));
+}
+
+test "StructVecListReal: get_attribute" {
+    const allocator = testing.allocator;
+    var svl = StructVecListReal(TestStructForTest).init(allocator);
+    defer svl.deinit();
+
+    const s1 = TestStructForTest{ .a = 100, .b = true };
+    const s2 = TestStructForTest{ .a = 200, .b = false };
+    const s3 = TestStructForTest{ .a = 300, .b = true };
+
+    try svl.append(s1);
+    try svl.append(s2);
+    try svl.append(s3);
+
+    const a_slice = svl.get_attribute("a");
+    const b_slice = svl.get_attribute("b");
+
+    try testing.expectEqualSlices(u32, &.{ 100, 200, 300 }, a_slice);
+    try testing.expectEqualSlices(bool, &.{ true, false, true }, b_slice);
+}
+
+test "StructVecListReal: delete" {
+    const allocator = testing.allocator;
+    var svl = StructVecListReal(TestStructForTest).init(allocator);
+    defer svl.deinit();
+
+    const s1 = TestStructForTest{ .a = 10, .b = true };
+    const s2 = TestStructForTest{ .a = 20, .b = false };
+    const s3 = TestStructForTest{ .a = 30, .b = true };
+    const s4 = TestStructForTest{ .a = 40, .b = false };
+
+    try svl.append(s1);
+    try svl.append(s2);
+    try svl.append(s3);
+    try svl.append(s4);
+
+    // State: [s1, s2, s3, s4], len=4
+    try testing.expectEqual(@as(usize, 4), svl.length);
+
+    // Delete from middle (s3 at index 2)
+    svl.delete(2);
+    try testing.expectEqual(@as(usize, 3), svl.length);
+
+    // Check that s4 is now at index 2
+    const s4_retrieved = svl.get_elem(2);
+    try testing.expect(s4.eql(s4_retrieved));
+    // Check that an earlier element is unaffected
+    const s2_retrieved = svl.get_elem(1);
+    try testing.expect(s2.eql(s2_retrieved));
+
+    // Check attributes view is correct
+    const a_slice = svl.get_attribute("a");
+    try testing.expectEqualSlices(u32, &.{ 10, 20, 40 }, a_slice);
+
+    // Delete from beginning
+    svl.delete(0); // delete s1
+    try testing.expectEqual(@as(usize, 2), svl.length);
+    const s2_now_at_start = svl.get_elem(0);
+    try testing.expect(s2.eql(s2_now_at_start));
+    const b_slice = svl.get_attribute("b");
+    try testing.expectEqualSlices(bool, &.{ false, false }, b_slice);
 }
